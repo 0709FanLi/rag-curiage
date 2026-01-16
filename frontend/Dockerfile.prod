@@ -1,0 +1,13 @@
+# Production stage
+FROM nginx:stable-alpine
+
+# Copy the built artifacts from the local dist folders
+# - dist-pc: PC 前端构建产物（Vite base=/pc/）
+# - dist-mobile: 移动 H5 前端构建产物（Vite base=/m/）
+COPY dist-pc /usr/share/nginx/html/pc
+COPY dist-mobile /usr/share/nginx/html/m
+
+# Nginx config is mounted via docker-compose volumes
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
