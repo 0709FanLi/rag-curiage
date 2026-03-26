@@ -11,7 +11,9 @@ export function get_api_base_url(): string {
 
 const api_client: AxiosInstance = axios.create({
   baseURL: get_api_base_url().replace(/\/+$/, ''),
-  timeout: 30_000,
+  // 问卷/报告生成涉及大模型调用，生产环境偶发较慢，需要更长超时。
+  // 具体接口仍可在调用处通过 config.timeout 覆盖。
+  timeout: 600_000,
 });
 
 api_client.interceptors.request.use((config) => {

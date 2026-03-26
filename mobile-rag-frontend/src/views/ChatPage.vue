@@ -523,7 +523,7 @@ async function send_message_with_content(content: string): Promise<void> {
       url: '/chat/message',
       method: 'POST',
       data: { session_id: session_id.value, content: trimmed },
-      timeout: 180_000,
+      timeout: 600_000,
     });
 
     const last = messages.value[messages.value.length - 1];

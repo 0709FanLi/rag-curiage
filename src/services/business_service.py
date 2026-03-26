@@ -671,7 +671,25 @@ class BusinessService:
                     session_id,
                     str(gemini_err),
                 )
-                raise
+                logger.warning(
+                    "StageC(Gemini) failed; falling back to DeepSeek HTML generation session=%s",
+                    session_id,
+                )
+                deepseek_raw = await llm_service.deepseek_completion(
+                    messages=[{"role": "user", "content": gemini_user}],
+                    system_prompt=gemini_system,
+                    model=llm_service.ds_reasoner_model,
+                    temperature=None,
+                    max_tokens=8000,
+                )
+                final_html, merged_json = await _stage_c_parse_llm_output(
+                    raw_text=deepseek_raw
+                )
+                logger.info(
+                    "StageC(DeepSeek) fallback after Gemini error succeeded, raw_length=%d session=%s",
+                    len(deepseek_raw or ""),
+                    session_id,
+                )
 
             # 更新报告（以 JSON 为准，不再从HTML正则提取）
             from datetime import datetime, timezone

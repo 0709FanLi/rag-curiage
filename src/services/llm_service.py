@@ -3,9 +3,14 @@ import logging
 import re
 from tenacity import retry, stop_after_attempt, wait_exponential
 from src.config.settings import settings
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("healthy_rag")
+
+
+class GeminiCallError(Exception):
+    """Gemini 调用失败（用于触发 fallback）。"""
+
 
 class LLMService:
     def __init__(self):
@@ -26,19 +31,16 @@ class LLMService:
         self.default_model = "deepseek-chat"  # Used as fallback/identifier
         self.reasoner_model = settings.DEEP_SEEK_MODEL_REASONER
 
-    @retry(
-        stop=stop_after_attempt(2), # Try Gemini twice before failing over
-        wait=wait_exponential(multiplier=1, min=2, max=5)
-    )
     async def _call_gemini(
         self,
         messages: List[Dict[str, str]],
         thinking_level: str = "low",
         temperature: float = 1.0,
         max_tokens: int = 4000,
+        timeout_seconds: Optional[float] = None,
     ) -> str:
         if not self.gemini_api_key:
-            raise ValueError("Gemini API Key not configured")
+            raise GeminiCallError("Gemini API Key not configured")
 
         url = f"{self.gemini_base_url}/chat/completions"
         headers = {
@@ -46,7 +48,7 @@ class LLMService:
             "Content-Type": "application/json"
         }
 
-        payload = {
+        payload: Dict[str, Any] = {
             "model": self.gemini_model,
             "messages": messages,
             "max_tokens": max_tokens,
@@ -58,24 +60,50 @@ class LLMService:
 
         import time
         start_time = time.time()
-        
-        async with httpx.AsyncClient(timeout=self.gemini_timeout) as client:
-            logger.info(f"[TIMING] Calling Gemini API ({thinking_level} thinking, max_tokens={max_tokens}, timeout={self.gemini_timeout}s)...")
+
+        effective_timeout = float(timeout_seconds or self.gemini_timeout)
+        async with httpx.AsyncClient(timeout=effective_timeout) as client:
+            logger.info(
+                "[TIMING] Calling Gemini API (%s thinking, max_tokens=%s, timeout=%ss)...",
+                thinking_level,
+                max_tokens,
+                effective_timeout,
+            )
             try:
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
             except httpx.TimeoutException as te:
-                logger.error(f"[GEMINI] Timeout after {self.gemini_timeout}s: {te}")
-                raise
+                logger.error("[GEMINI] Timeout after %ss: %s", effective_timeout, te)
+                raise GeminiCallError("Gemini timeout") from te
             except httpx.HTTPStatusError as he:
-                logger.error(f"[GEMINI] HTTP error {he.response.status_code}: {he.response.text[:500]}")
-                raise
+                logger.error(
+                    "[GEMINI] HTTP error %s: %s",
+                    he.response.status_code,
+                    he.response.text[:500],
+                )
+                raise GeminiCallError(
+                    f"Gemini HTTP error {he.response.status_code}"
+                ) from he
+            except Exception as exc:
+                logger.exception("[GEMINI] Unexpected error: %s", exc)
+                raise GeminiCallError("Gemini unexpected error") from exc
             
             result = response.json()
             if not result.get("choices") or not result["choices"][0].get("message"):
                 logger.error(f"[GEMINI] Unexpected response structure: {str(result)[:500]}")
-                raise ValueError(f"Gemini returned unexpected response: {str(result)[:200]}")
-            content = result["choices"][0]["message"]["content"].strip()
+                raise GeminiCallError(
+                    f"Gemini returned unexpected response: {str(result)[:200]}"
+                )
+
+            message = result["choices"][0]["message"]
+            raw_content = message.get("content") if isinstance(message, dict) else None
+            if raw_content is None:
+                logger.error(
+                    "[GEMINI] Missing message.content in response: %s",
+                    str(result)[:500],
+                )
+                raise GeminiCallError("Gemini response missing message.content")
+            content = str(raw_content).strip()
             
             elapsed = time.time() - start_time
             logger.info(f"[TIMING] Gemini API responded in {elapsed:.2f}s")
@@ -98,7 +126,7 @@ class LLMService:
             content = content.strip()
             
             # Log if thinking content was detected and removed
-            if "<think>" in result["choices"][0]["message"]["content"].lower():
+            if "<think>" in str(raw_content).lower():
                 logger.info("[FILTER] Removed <think> tags from response")
             
             # Some upstream gateways may return a sentinel string instead of a normal answer
@@ -106,7 +134,7 @@ class LLMService:
             # `chat_completion()` can fall back to DeepSeek automatically.
             if content.strip().upper() == "PROHIBITED_CONTENT":
                 logger.warning("[GEMINI] Upstream returned PROHIBITED_CONTENT sentinel; fallback")
-                raise ValueError("Gemini returned PROHIBITED_CONTENT sentinel")
+                raise GeminiCallError("Gemini returned PROHIBITED_CONTENT sentinel")
             
             return content
 
@@ -172,14 +200,77 @@ class LLMService:
         
         effective_thinking_level = thinking_level
         
-        # Try Gemini First
-        try:
-            return await self._call_gemini(
-                messages=final_messages,
-                thinking_level=effective_thinking_level
+        # 对话（问卷）场景：先 DeepSeek，再 Gemini（按产品要求调整顺序）。
+        # 仍然要避免“单次请求过长 + 重试”导致前端/网关先超时。
+        if effective_thinking_level == "low":
+            chat_max_tokens = int(
+                getattr(settings, "GEMINI_CHAT_MAX_TOKENS", 1200) or 1200
             )
-        except Exception as e:
-            logger.error(f"Gemini API failed: {str(e)}. Falling back to DeepSeek.")
+
+            # 1) DeepSeek 优先
+            try:
+                return await self._call_deepseek(
+                    messages=final_messages,
+                    model=self.ds_chat_model,
+                    temperature=0.7,
+                    max_tokens=chat_max_tokens,
+                )
+            except Exception as e:
+                logger.error(
+                    "DeepSeek(chat) failed: %s. Falling back to Gemini(chat).",
+                    str(e),
+                )
+
+            # 2) DeepSeek 失败后再 Gemini（超时由 GEMINI_CHAT_TIMEOUT 控制）
+            gemini_timeout = float(
+                getattr(settings, "GEMINI_CHAT_TIMEOUT", 300) or 300
+            )
+            try:
+                return await self._call_gemini(
+                    messages=final_messages,
+                    thinking_level=effective_thinking_level,
+                    temperature=0.7,
+                    max_tokens=chat_max_tokens,
+                    timeout_seconds=gemini_timeout,
+                )
+            except GeminiCallError as e:
+                logger.error(
+                    "Gemini(chat) failed after DeepSeek fallback: %s",
+                    str(e),
+                )
+        else:
+            # 报告场景：允许 Gemini 更长时间与少量重试
+            max_attempts = int(
+                getattr(settings, "GEMINI_REPORT_MAX_ATTEMPTS", 2) or 2
+            )
+            last_err: Optional[Exception] = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return await self._call_gemini(
+                        messages=final_messages,
+                        thinking_level=effective_thinking_level,
+                        temperature=0.7,
+                        max_tokens=8000,
+                        timeout_seconds=float(self.gemini_timeout),
+                    )
+                except GeminiCallError as e:
+                    last_err = e
+                    logger.error(
+                        "Gemini(report) failed attempt=%s/%s: %s",
+                        attempt,
+                        max_attempts,
+                        str(e),
+                    )
+                    if attempt < max_attempts:
+                        # 轻量退避，避免打爆上游
+                        import asyncio
+
+                        await asyncio.sleep(min(5, 2 * attempt))
+
+            logger.error(
+                "Gemini(report) failed after %s attempts; fallback to DeepSeek.",
+                max_attempts,
+            )
             
             # Fallback Logic
             fallback_model = self.ds_chat_model
@@ -194,6 +285,14 @@ class LLMService:
                 model=fallback_model,
                 temperature=fallback_temp
             )
+
+        # 兜底：低思考场景下 DeepSeek 与 Gemini 都失败，最后再按原逻辑返回 DeepSeek（抛错由上层处理）
+        fallback_model = self.ds_chat_model
+        return await self._call_deepseek(
+            messages=final_messages,
+            model=fallback_model,
+            temperature=0.7,
+        )
 
     async def gemini_completion(
         self,

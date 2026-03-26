@@ -16,6 +16,18 @@ import logging
 router = APIRouter()
 logger = logging.getLogger("healthy_rag")
 
+_PHONE_PATTERN = re.compile(r"^1\d{10}$")
+_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _looks_like_phone(value: str) -> bool:
+    return bool(_PHONE_PATTERN.match(value or ""))
+
+
+def _looks_like_email(value: str) -> bool:
+    return bool(_EMAIL_PATTERN.match(value or ""))
+
+
 def _mask_email(email: Optional[str]) -> str:
     if not email:
         return ""
@@ -72,7 +84,7 @@ class RegisterRequest(BaseModel):
     def validate_email(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", v):
+        if not _looks_like_email(v):
             raise ValueError("邮箱格式不正确")
         return v
 
@@ -81,7 +93,7 @@ class RegisterRequest(BaseModel):
     def validate_phone(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        if not re.match(r"^1\d{10}$", v):
+        if not _looks_like_phone(v):
             raise ValueError("手机号格式不正确")
         return v
 
@@ -128,7 +140,7 @@ class EmailCodeRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def validate_email(cls, v: str) -> str:
-        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", v):
+        if not _looks_like_email(v):
             raise ValueError("邮箱格式不正确")
         return v
 
@@ -211,6 +223,22 @@ async def register(
     try:
         # Legacy: username/password
         if request.username:
+            if _looks_like_phone(request.username):
+                existing_phone_user = (
+                    await db.execute(
+                        select(User).where(User.phone == request.username)
+                    )
+                ).scalar_one_or_none()
+                if existing_phone_user:
+                    logger.info(
+                        "Register rejected (phone exists) username=%s",
+                        _mask_phone(request.username),
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="手机号已注册，请直接登录或使用找回密码",
+                    )
+
             result = await db.execute(
                 select(User).where(User.username == request.username)
             )
@@ -344,16 +372,34 @@ async def login_for_access_token(
     """
     # 查询用户（兼容：username / email / phone）
     identifier = form_data.username
-    result = await db.execute(
-        select(User).where(
-            or_(
-                User.username == identifier,
-                User.email == identifier,
-                User.phone == identifier,
-            )
-        )
-    )
-    user = result.scalar_one_or_none()
+    if _looks_like_phone(identifier):
+        user = (
+            await db.execute(select(User).where(User.phone == identifier))
+        ).scalar_one_or_none()
+        if user is None:
+            user = (
+                await db.execute(select(User).where(User.username == identifier))
+            ).scalar_one_or_none()
+    elif _looks_like_email(identifier):
+        user = (
+            await db.execute(select(User).where(User.email == identifier))
+        ).scalar_one_or_none()
+        if user is None:
+            user = (
+                await db.execute(select(User).where(User.username == identifier))
+            ).scalar_one_or_none()
+    else:
+        user = (
+            await db.execute(select(User).where(User.username == identifier))
+        ).scalar_one_or_none()
+        if user is None:
+            user = (
+                await db.execute(select(User).where(User.email == identifier))
+            ).scalar_one_or_none()
+        if user is None:
+            user = (
+                await db.execute(select(User).where(User.phone == identifier))
+            ).scalar_one_or_none()
 
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(

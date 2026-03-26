@@ -1,5 +1,5 @@
 """
-百川智能 Baichuan-M2-Plus API 服务
+百川智能 Baichuan-M3-Plus API 服务
 用于获取基础健康建议和治疗方案
 """
 import json
@@ -65,7 +65,7 @@ class BaichuanService:
         temperature: float = 0.3
     ) -> Optional[str]:
         """
-        调用百川 Baichuan-M2-Plus 模型获取健康建议
+        调用百川 Baichuan-M3-Plus 模型获取健康建议
         
         Args:
             user_info: 用户基本信息

@@ -5,7 +5,7 @@ import { ElMessage } from 'element-plus'
 const service = axios.create({
   // 生产环境使用相对路径 /api/v1 (通过 Nginx 代理)，开发环境使用 localhost:8010
   baseURL: import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? '/api/v1' : 'http://localhost:8010/api/v1'),
-  timeout: 300000 // DeepSeek 思考模式需长超时 (5min = 300s)
+  timeout: 600000 // 大模型偶发较慢，超时提高到 10min（与后端降级策略配合）
 })
 
 // Request interceptor

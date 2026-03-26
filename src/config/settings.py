@@ -35,11 +35,16 @@ class Settings(BaseSettings):
     GEMINI_BASE_URL: str = "https://grsai.dakka.com.cn/v1"
     GEMINI_MODEL: str = "gemini-3-pro"
     GEMINI_TIMEOUT: int = 300
+    # Gemini: chat（问卷/对话）建议更短超时，避免前端/网关先超时
+    GEMINI_CHAT_TIMEOUT: int = 300
+    GEMINI_CHAT_MAX_TOKENS: int = 1200
+    # Gemini: report（报告生成）允许少量重试
+    GEMINI_REPORT_MAX_ATTEMPTS: int = 2
 
     # Baichuan (百川智能)
     BAICHUAN_API_KEY: Optional[str] = Field(default=None, alias="BAICHUAN_API_KEY")
     BAICHUAN_BASE_URL: str = "https://api.baichuan-ai.com/v1"
-    BAICHUAN_MODEL: str = "Baichuan-M2-Plus"
+    BAICHUAN_MODEL: str = "Baichuan-M3-Plus"
     BAICHUAN_TIMEOUT: int = 300
 
     # Qwen VL (通义千问视觉理解)
